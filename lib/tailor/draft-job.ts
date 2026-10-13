@@ -3,14 +3,13 @@ import { jobs, companies, jobDescriptions, applicationForms, drafts } from "@/db
 import { eq } from "drizzle-orm";
 import { enrichJob } from "@/lib/enrich";
 import { generateDraft } from "./generate";
-import { tailorResumeForJob } from "@/lib/resume/compile-job";
 
 /**
- * Generate and store a tailored draft for a job. Enriches first if the JD
- * hasn't been fetched yet. Also compiles a per-job resume PDF (education
- * track + project ranking + skill keyword order).
+ * Generate and store application answers (form fields + short cover letter)
+ * for a job. Enriches first if the JD hasn't been fetched yet. The resume is
+ * never touched: every application attaches the same data/resume.pdf.
  */
-export async function draftJobById(jobId: number): Promise<{ draftId: number; resumePath?: string }> {
+export async function draftJobById(jobId: number): Promise<{ draftId: number }> {
   let [row] = await loadJob(jobId);
   if (!row) throw new Error("job not found");
 
@@ -37,24 +36,7 @@ export async function draftJobById(jobId: number): Promise<{ draftId: number; re
     .returning({ id: drafts.id });
   await db.update(jobs).set({ status: "drafted", updatedAt: new Date() }).where(eq(jobs.id, jobId));
 
-  let resumePath: string | undefined;
-  try {
-    const art = tailorResumeForJob({
-      jobId,
-      kind: row.kind,
-      title: row.title,
-      jdText: row.jd,
-      llmPlan: result.resumePlan,
-    });
-    resumePath = art.pdfPath;
-  } catch (e) {
-    console.warn(
-      `[draft] resume tailor failed for job ${jobId}:`,
-      e instanceof Error ? e.message : e,
-    );
-  }
-
-  return { draftId: inserted.id, resumePath };
+  return { draftId: inserted.id };
 }
 
 function loadJob(jobId: number) {

@@ -37,7 +37,7 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
   const open = inArray(jobs.status, ["discovered", "drafted"]);
   const rows =
     view === "inbox"
-      ? await base.where(and(open, isNull(jobs.closedAt))).orderBy(desc(jobs.firstSeenAt)).limit(800)
+      ? await base.where(and(open, isNull(jobs.closedAt))).orderBy(desc(jobs.firstSeenAt)).limit(5000)
       : view === "closed"
         ? await base.where(and(open, isNotNull(jobs.closedAt))).orderBy(desc(jobs.closedAt)).limit(300)
         : await base.where(eq(jobs.status, view)).orderBy(desc(jobs.updatedAt)).limit(300);
@@ -51,7 +51,7 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
         <div>
           <h1 className="text-2xl font-semibold">auto-apply</h1>
           <p className="text-[color:var(--color-muted)] text-sm mt-1">
-            New-grad SWE + internships · SF / NYC / Remote-US · sorted by release
+            Embedded · firmware · robotics · FPGA · hardware internships · anywhere in the US · sorted by release
           </p>
         </div>
         <div className="flex items-center gap-4">

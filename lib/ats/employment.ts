@@ -35,13 +35,3 @@ export function titleWithEmployment(title: string, employmentType: string | null
   if (EARLY_EMPLOYMENT_RE.test(t)) return t;
   return `${t} (${et})`;
 }
-
-export function kindFromTitleOrEmployment(
-  title: string,
-  employmentType?: string | null,
-): "internship" | "new-grad" {
-  if (isInternshipEmployment(employmentType) || /\b(intern(ship)?|co-?op)\b/i.test(title)) {
-    return "internship";
-  }
-  return "new-grad";
-}

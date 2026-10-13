@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "auto-apply",
-  description: "New-grad SWE job inbox + apply assistant",
+  description: "Embedded / robotics internship inbox + apply assistant",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -27,7 +27,7 @@ export async function resolveFieldsWithClaude(args: {
   if (args.fields.length === 0 || !process.env.ANTHROPIC_API_KEY) return new Map();
   const client = new Anthropic();
 
-  const system = `You fill real job-application form fields for a candidate. You get the live form fields (with exact options where applicable) plus the candidate's contact info, canonical screening answers, an already-tailored Q&A draft, and a tailored cover letter.
+  const system = `You fill real job-application form fields for a candidate. You get the live form fields (with exact options where applicable) plus the candidate's contact info, canonical screening answers, a Q&A draft written for this job, and a cover letter.
 
 Rules:
 - For select/radio/checkbox/combobox fields: the answer MUST be exactly one of the provided options, character-for-character (for checkbox groups, a comma-separated subset). If options are not provided: for a large school/university dropdown use contact.school (closest official name); for combobox/location give a short standard value; otherwise answer from contact/draft.
@@ -35,7 +35,7 @@ Rules:
 - Language skill checkboxes: pick languages the candidate actually speaks from the options (at minimum English when listed).
 - Contact/identity fields: use the contact JSON verbatim. Never invent contact info.
 - Demographic/EEOC (gender, race, ethnicity, veteran, disability, orientation): ALWAYS pick the decline/prefer-not-to-answer option when one exists. If no decline option exists, answer null (leave it blank) — never assert demographic facts not in the canonical answers.
-- Free text: reuse the tailored Q&A draft when a question matches; otherwise write 1-3 grounded sentences in the candidate's voice. A "cover letter" or "additional information" textarea gets the cover letter text.
+- Free text: reuse the Q&A draft when a question matches; otherwise write 1-3 grounded sentences in the candidate's voice. A "cover letter" or "additional information" textarea gets the cover letter text.
 - Fields that ask for things the candidate doesn't have (e.g. "referral employee name"): answer null.
 - Never fabricate credentials, availability, or authorizations beyond the canonical answers.
 - NEVER use em dashes (—) in free-text answers. Use a comma, colon, period, or parentheses instead.
@@ -51,10 +51,10 @@ Return an answer (or null) for EVERY field idx given.`;
     `## Canonical screening answers (use verbatim when relevant)`,
     JSON.stringify(loadScreeningAnswers()),
     ``,
-    `## Tailored Q&A draft`,
+    `## Q&A draft`,
     JSON.stringify(args.qa),
     ``,
-    `## Tailored cover letter`,
+    `## Cover letter`,
     args.coverLetterMd,
     ``,
     `## Job description (context)`,

@@ -5,14 +5,14 @@ import type { AtsType } from "@/db/schema";
 import { greenhouseJobRef } from "@/lib/ats/questions";
 import { extractLiveFields, type LiveField } from "./extract";
 import { resolveFieldsWithClaude } from "./resolve";
-import { resumePathForJob, contactOverridesForKind, transcriptPath } from "@/lib/resume/paths";
+import { loadScreeningAnswers } from "@/lib/tailor/prompt";
+import { resumePath as defaultResumePath, transcriptPath } from "@/lib/resume/paths";
 import { emailCodeReady, fetchEmailCode } from "./email-code";
 import { ApplyDebugLog } from "./debug-log";
-import type { JobKind } from "@/db/schema";
 
 /**
  * Universal auto-apply: read the form the page ACTUALLY renders (any ATS),
- * answer each field from contact.json + the tailored draft, ask Claude to
+ * answer each field from contact.json + the job's draft answers, ask Claude to
  * resolve anything unmatched, fill, attach resume, submit.
  *
  * Headed by default; on CAPTCHA or anything unexpected the browser stays open
@@ -48,7 +48,7 @@ export function loadContact(): Contact {
   return JSON.parse(readFileSync(CONTACT_PATH, "utf-8")) as Contact;
 }
 
-/** The recruiter-visible upload name, e.g. "Dheer_Guda_Resume.pdf". */
+/** The recruiter-visible upload name, e.g. "Jane_Doe_Resume.pdf". */
 function resumeUploadName(contact: Contact): string {
   const name = (contact.fullName ?? "").trim().replace(/\s+/g, "_");
   return name ? `${name}_Resume.pdf` : "Resume.pdf";
@@ -94,9 +94,6 @@ export async function applyToJob(args: {
   submit: boolean;
   headless?: boolean;
   jobTag: string;
-  /** Selects B.S. vs B.S./M.S. resume + contact graduation overrides. */
-  kind?: JobKind;
-  /** When set, prefers data/resumes/<jobId>.pdf if a tailored resume exists. */
   jobId?: number;
 }): Promise<ApplyOutcome> {
   const log = new ApplyDebugLog(args.jobTag);
@@ -111,10 +108,9 @@ export async function applyToJob(args: {
       resumeAttached: false,
     });
   }
-  const contact = { ...loadContact(), ...contactOverridesForKind(args.kind) };
-  const resumePath = resumePathForJob(args.jobId, args.kind);
-  // Upload under one standard name: ATSes show the file name to recruiters,
-  // and the internal storage key ("871.pdf") must never leak there.
+  const contact = loadContact();
+  const resumePath = defaultResumePath();
+  // Upload under one standard name: ATSes show the file name to recruiters.
   const resumeFileName = resumeUploadName(contact);
   const resumeUpload = () => ({
     name: resumeFileName,
@@ -759,12 +755,29 @@ function normalizeLabel(s: string): string {
   return s.replace(/\s*\*\s*$/, "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+/** "Yes" / "No" when a screening answer starts with one, else null (unknown → let the resolver or human decide). */
+function screeningYesNo(key: string): "Yes" | "No" | null {
+  const v = loadScreeningAnswers()[key]?.trim() ?? "";
+  if (/^yes\b/i.test(v)) return "Yes";
+  if (/^no\b/i.test(v)) return "No";
+  return null;
+}
+
 function resolveByCode(field: LiveField, contact: Contact, draft: Map<string, string>): string | null {
   // Ashby/Greenhouse Yes/No first — before CONTACT_RULES, which can false-hit
   // long policy labels (e.g. "majority" ⊃ "major" → discipline).
   if (field.options?.length === 2 && field.options.every((o) => /^(yes|no)$/i.test(o))) {
     if (/authoriz(ed|ation).{0,40}work|work.{0,20}lawfully|legally\s+authorized/i.test(field.label)) {
-      return matchOption(field.options, "Yes") ?? "Yes";
+      const yn = screeningYesNo("work_authorization_us");
+      if (yn) return matchOption(field.options, yn) ?? yn;
+    }
+    if (/sponsorship|visa/i.test(field.label)) {
+      const yn = screeningYesNo("requires_sponsorship");
+      if (yn) return matchOption(field.options, yn) ?? yn;
+    }
+    if (/u\.?s\.?\s*citizen/i.test(field.label)) {
+      const yn = screeningYesNo("us_citizen");
+      if (yn) return matchOption(field.options, yn) ?? yn;
     }
     if (
       /confirm that you have read|in[- ]office|anchor days|willing to relocate|understand.{0,80}(policy|requirement)|in person company/i.test(
@@ -784,6 +797,7 @@ function resolveByCode(field: LiveField, contact: Contact, draft: Map<string, st
     const opts = field.options;
     const pick = (...candidates: string[]) => {
       for (const c of candidates) {
+        if (!c.trim()) continue; // matchOption("") would match the first option
         const m = matchOption(opts, c);
         if (m) return m;
       }
@@ -793,20 +807,17 @@ function resolveByCode(field: LiveField, contact: Contact, draft: Map<string, st
       return pick("Prefer not to say", "Decline", "Not represented here") ?? null;
     }
     if (/sponsorship|visa status|require any of the below sponsorship/i.test(field.label)) {
-      return pick("None", "No") ?? null;
+      return screeningYesNo("requires_sponsorship") === "No" ? (pick("None", "No") ?? null) : null;
     }
     if (/how did you hear|hear about this/i.test(field.label)) {
-      return pick("LinkedIn", "Linkedin") ?? null;
+      const src = loadScreeningAnswers().referral_source ?? "";
+      return pick(src, "Company Website", "Careers Page", "Job Board", "Other") ?? null;
     }
     if (/type of role|roles? are you interested/i.test(field.label)) {
-      return pick("Security", "Infra", "Product") ?? null;
+      return pick("Embedded", "Firmware", "Robotics", "Hardware", "Autonomy", "Controls") ?? null;
     }
     if (/degree type|what degree/i.test(field.label)) {
-      // Internship track often B.S./M.S. — prefer Master's when listed, else undergrad.
-      return pick("Master's", "Masters", "Undergraduate/Bachelors", "Bachelor") ?? null;
-    }
-    if (/prior internship|how many.*internship/i.test(field.label)) {
-      return pick("3+", "2", "2+") ?? null;
+      return pick(contact.degree ?? "", "Bachelor's", "Bachelors", "Undergraduate/Bachelors", "Bachelor") ?? null;
     }
     if (/gender/i.test(field.label)) {
       return pick("Decline to self-identify", "Prefer not to say", "Decline") ?? null;
@@ -833,7 +844,7 @@ function resolveByCode(field: LiveField, contact: Contact, draft: Map<string, st
     } else if (/university\s*email|school\s*email|\.edu\b/i.test(label)) {
       if (contact.email) return contact.email;
     } else if (/standardized\s*test\s*score\s*type|test\s*score\s*type/i.test(label)) {
-      return contact.standardizedTestType || "SAT";
+      if (contact.standardizedTestType) return contact.standardizedTestType;
     } else if (/\bSAT\b/i.test(label) && /result|score/i.test(label)) {
       // IMC-style ranges: prefer satRange when present.
       return contact.satRange || contact.sat || null;

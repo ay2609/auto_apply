@@ -1,20 +1,18 @@
 import { db } from "@/db";
 import { jobs } from "@/db/schema";
-import { upsertCompany, SWE_TITLE_RE, NEGATIVE_TITLE_RE, QUANT_TITLE_RE } from "@/lib/ingest/run";
+import { upsertCompany } from "@/lib/ingest/run";
 import { dedupeKey, coarseKey } from "@/lib/ingest/dedupe";
-import { classify, isTarget } from "@/lib/ingest/location";
-import { isEarlyCareerTitle } from "@/lib/ingest/early-career";
+import { classify, isTargetLocation } from "@/lib/ingest/location";
+import { isWantedPosting, searchConfig } from "@/lib/target";
 import { loadState, saveState } from "./discover";
 import { loadCoarseKeys } from "./coarse";
 
 /**
- * Google Careers early-career scout.
+ * Google Careers scout (Google, Waymo-adjacent hardware, Pixel/Nest, TPU silicon).
  *
- * Google (and peers) post university / early-career SWE roles on their own
- * careers site — often before (or without) landing on GitHub new-grad lists,
- * and Google's ATS isn't Greenhouse/Lever/Ashby so the board scout never sees
- * them. This polls the public HTML results pages for US early-career SWE roles
- * in target locations (SF / NYC / Remote-US).
+ * Google's ATS isn't Greenhouse/Lever/Ashby so the board scout never sees it.
+ * This polls the public HTML results pages for US intern (and, if enabled,
+ * early-career) roles matching embedded / hardware / robotics searches.
  */
 
 const UA =
@@ -23,7 +21,9 @@ const BASE = "https://www.google.com/about/careers/applications/jobs/results/";
 const MIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 4×/day is plenty; careers pages are heavy
 const MAX_PAGES = 4;
 
-type GooglePosting = { title: string; locationRaw: string; applyUrl: string; jobId: string };
+type GooglePosting = { title: string; locationRaw: string; applyUrl: string; jobId: string; level?: "internship" | "new-grad" };
+
+const QUERIES = ["embedded", "firmware", "hardware", "robotics", "electrical engineering", "silicon", "systems software"];
 
 export type ScoutGoogleResult = {
   skipped: boolean;
@@ -40,7 +40,7 @@ export async function scoutGoogleCareers(): Promise<ScoutGoogleResult> {
   }
   const firstScan = !state.lastGoogleScanAt;
 
-  const postings = await fetchEarlyCareerSwe();
+  const postings = await fetchPostings();
   const existingKeys = new Set(db.select({ k: jobs.dedupeKey }).from(jobs).all().map((r) => r.k));
   const coarseKeys = loadCoarseKeys();
   const now = new Date();
@@ -48,15 +48,10 @@ export async function scoutGoogleCareers(): Promise<ScoutGoogleResult> {
   let seeded = 0;
 
   for (const p of postings) {
-    if (!isEarlyCareerTitle(p.title) && !/\buniversity\b/i.test(p.title)) continue;
-    if (NEGATIVE_TITLE_RE.test(p.title)) continue;
-    if (!SWE_TITLE_RE.test(p.title) && !QUANT_TITLE_RE.test(p.title)) continue;
-    // Drop pure hardware / tech ops unless title also screams software.
-    if (isHardwareHeavy(p.title) && !/\b(software|swe|sde|devops|full[\s-]?stack|backend|frontend)\b/i.test(p.title)) {
-      continue;
-    }
+    const kind = isWantedPosting({ title: p.title, company: "Google", listKind: p.level });
+    if (!kind) continue;
+    if (!isTargetLocation(p.locationRaw)) continue;
     const loc = classify(p.locationRaw);
-    if (!isTarget(loc)) continue;
 
     const key = dedupeKey("Google", p.title, p.locationRaw);
     if (existingKeys.has(key)) continue;
@@ -71,7 +66,7 @@ export async function scoutGoogleCareers(): Promise<ScoutGoogleResult> {
       .values({
         companyId,
         title: p.title,
-        kind: /intern(ship)?/i.test(p.title) ? "internship" : "new-grad",
+        kind,
         locationRaw: p.locationRaw,
         locationClass: loc,
         applyUrl: p.applyUrl,
@@ -102,39 +97,35 @@ export async function scoutGoogleCareers(): Promise<ScoutGoogleResult> {
   };
 }
 
-function isHardwareHeavy(title: string): boolean {
-  return /\b(rtl|asic|dft|silicon|chip|hardware|data center technician|network operations|optical transport|physical design|verification engineer|tpm\b|program manager)\b/i.test(
-    title,
-  );
-}
-
-async function fetchEarlyCareerSwe(): Promise<GooglePosting[]> {
-  const queries = [
-    { q: "Software Engineer", location: "United States" },
-    { q: "Software Engineer", location: "California, USA" },
-    { q: "Early Career Software", location: "United States" },
+async function fetchPostings(): Promise<GooglePosting[]> {
+  const levels = searchConfig().levels;
+  const targetLevels: Array<{ param: string; level: "internship" | "new-grad" }> = [
+    ...(levels.includes("internship") ? [{ param: "INTERN_AND_APPRENTICE", level: "internship" as const }] : []),
+    ...(levels.includes("new-grad") ? [{ param: "EARLY", level: "new-grad" as const }] : []),
   ];
   const byId = new Map<string, GooglePosting>();
 
-  for (const { q, location } of queries) {
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      const url = new URL(BASE);
-      url.searchParams.set("target_level", "EARLY");
-      url.searchParams.set("location", location);
-      url.searchParams.set("q", q);
-      if (page > 1) url.searchParams.set("page", String(page));
+  for (const { param, level } of targetLevels) {
+    for (const q of QUERIES) {
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const url = new URL(BASE);
+        url.searchParams.set("target_level", param);
+        url.searchParams.set("location", "United States");
+        url.searchParams.set("q", q);
+        if (page > 1) url.searchParams.set("page", String(page));
 
-      const res = await fetch(url, {
-        headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
-        signal: AbortSignal.timeout(20_000),
-      });
-      if (!res.ok) break;
-      const html = await res.text();
-      const pageJobs = parseGoogleCareersHtml(html);
-      if (pageJobs.length === 0) break;
-      for (const j of pageJobs) byId.set(j.jobId, j);
-      // Google pages are ~20 cards; stop early if short page.
-      if (pageJobs.length < 10) break;
+        const res = await fetch(url, {
+          headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
+          signal: AbortSignal.timeout(20_000),
+        }).catch(() => null);
+        if (!res?.ok) break;
+        const html = await res.text();
+        const pageJobs = parseGoogleCareersHtml(html);
+        if (pageJobs.length === 0) break;
+        for (const j of pageJobs) if (!byId.has(j.jobId)) byId.set(j.jobId, { ...j, level });
+        // Google pages are ~20 cards; stop early if short page.
+        if (pageJobs.length < 10) break;
+      }
     }
   }
   return [...byId.values()];

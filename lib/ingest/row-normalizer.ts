@@ -7,6 +7,8 @@ export type RawJobRow = {
   applyUrl: string;
   postedDate: string | null;
   isClosed: boolean;
+  /** SimplifyJobs marks Masters/PhD-required roles with 🎓. */
+  advancedDegree?: boolean;
 };
 
 const TITLE_HINTS =
@@ -33,6 +35,7 @@ const KNOWN_ATS =
 export function normalizeRow(headers: string[], cells: string[]): RawJobRow | null {
   const hMap = mapHeaders(headers);
   const isClosed = cells.some((c) => CLOSED_RE.test(c));
+  const advancedDegree = cells.some((c) => c.includes("🎓"));
 
   let company = "";
   let title = "";
@@ -74,7 +77,7 @@ export function normalizeRow(headers: string[], cells: string[]): RawJobRow | nu
 
   if (!company || !title || !applyUrl) return null;
 
-  return { company, title, locationRaw: locationRaw || "Unspecified", applyUrl, postedDate, isClosed };
+  return { company, title, locationRaw: locationRaw || "Unspecified", applyUrl, postedDate, isClosed, advancedDegree };
 }
 
 type HeaderMap = { company: number; role: number; location: number; apply: number; date: number };

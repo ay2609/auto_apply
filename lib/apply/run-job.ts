@@ -3,8 +3,7 @@ import { jobs, companies, drafts, jobDescriptions, applications } from "@/db/sch
 import { eq, and, ne, desc } from "drizzle-orm";
 import { draftJobById } from "@/lib/tailor/draft-job";
 import { applyToJob, type ApplyOutcome } from "./index";
-import { tailorResumeForJob, jobResumePdfPath } from "@/lib/resume/compile-job";
-import { existsSync } from "node:fs";
+import { unfilledScreeningAnswers } from "@/lib/tailor/prompt";
 
 export type RunApplyResult = { blocked: string } | ApplyOutcome;
 
@@ -17,9 +16,13 @@ export async function runApplyForJob(
   jobId: number,
   opts: { force?: boolean; headless?: boolean; submit?: boolean } = {},
 ): Promise<RunApplyResult> {
+  const todo = unfilledScreeningAnswers();
+  if (todo.length > 0) {
+    throw new Error(`fill in data/screening-answers.json first (still TODO: ${todo.join(", ")})`);
+  }
   let [draft] = await db.select().from(drafts).where(eq(drafts.jobId, jobId)).orderBy(desc(drafts.createdAt)).limit(1);
   if (!draft) {
-    await draftJobById(jobId); // enriches (JD + form) then tailors draft + resume
+    await draftJobById(jobId); // enriches (JD + form) then drafts form answers
     [draft] = await db.select().from(drafts).where(eq(drafts.jobId, jobId)).orderBy(desc(drafts.createdAt)).limit(1);
   }
   const [row] = await db
@@ -29,7 +32,6 @@ export async function runApplyForJob(
       finalUrl: jobs.finalUrl,
       atsType: jobs.atsType,
       title: jobs.title,
-      kind: jobs.kind,
       company: companies.name,
       jd: jobDescriptions.text,
     })
@@ -38,15 +40,6 @@ export async function runApplyForJob(
     .leftJoin(jobDescriptions, eq(jobDescriptions.jobId, jobs.id))
     .where(eq(jobs.id, jobId));
   if (!row || !draft) throw new Error("job/draft missing");
-
-  // Ensure a per-job resume exists (older drafts may predate this feature).
-  if (!existsSync(jobResumePdfPath(jobId)) && row.jd) {
-    try {
-      tailorResumeForJob({ jobId, kind: row.kind, title: row.title, jdText: row.jd });
-    } catch (e) {
-      console.warn(`[apply] resume tailor failed for job ${jobId}:`, e instanceof Error ? e.message : e);
-    }
-  }
 
   // Double-apply guard: same company, another job already applied.
   if (!opts.force) {
@@ -68,7 +61,6 @@ export async function runApplyForJob(
     company: row.company,
     title: row.title,
     jdText: row.jd ?? "",
-    kind: row.kind,
     jobId,
     submit: opts.submit ?? process.env.AUTO_SUBMIT !== "0",
     headless: opts.headless,

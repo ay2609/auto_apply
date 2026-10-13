@@ -5,15 +5,16 @@ import { db } from "@/db";
 import { jobs } from "@/db/schema";
 import { upsertCompany, BACKFILL_THRESHOLD } from "@/lib/ingest/run";
 import { dedupeKey, coarseKey } from "@/lib/ingest/dedupe";
-import { classify, isTarget } from "@/lib/ingest/location";
+import { classify, isTargetLocation } from "@/lib/ingest/location";
+import { isWantedPosting, searchConfig } from "@/lib/target";
 import { isBlockedCompany } from "@/lib/ingest/blocklist";
 import { detectAts } from "@/lib/ats/detect";
 import { loadState, saveState } from "./discover";
 import { loadCoarseKeys } from "./coarse";
 
 /**
- * HN "Ask HN: Who is hiring?" scout — startup-dense, SF/NYC-heavy, and lots of
- * roles that never reach the GitHub lists. Public Algolia API, no auth.
+ * HN "Ask HN: Who is hiring?" scout — hardware/robotics startups often post
+ * here and nowhere else. Public Algolia API, no auth.
  * Regex prefilter → Claude extracts structured postings from matching comments.
  */
 
@@ -65,9 +66,12 @@ export async function scoutHn(): Promise<ScoutHnResult> {
   );
 
   // Cheap prefilter before spending tokens.
-  const ROLE_RE = /(new.?grad|university\s*grad|entry.?level|junior|early.?career|intern)/i;
-  const LOC_RE = /(san\s*francisco|\bsf\b|bay\s*area|new\s*york|\bnyc\b|remote)/i;
-  const candidates = top.filter((c) => ROLE_RE.test(c.comment_text!) && LOC_RE.test(c.comment_text!));
+  const LEVEL_RE = searchConfig().levels.includes("new-grad")
+    ? /(intern|co-?op|new.?grad|university\s*grad|entry.?level|junior|early.?career)/i
+    : /(intern|co-?op)/i;
+  const DOMAIN_RE =
+    /(embedded|firmware|robot|autonom|fpga|rtl|verilog|hardware|electrical|pcb|drone|uav|avionics|aerospace|satellite|rocket|lidar|perception|slam|ros\b|real.?time|rtos|controls?\s+eng|mechatronic|sensor)/i;
+  const candidates = top.filter((c) => LEVEL_RE.test(c.comment_text!) && DOMAIN_RE.test(c.comment_text!));
 
   // Second stream: "X (YC W26) Is Hiring …" job posts on the HN front page.
   // Fetched as pseudo-comments through the same extractor.
@@ -81,7 +85,7 @@ export async function scoutHn(): Promise<ScoutHnResult> {
     const SENIOR_RE = /\b(senior|staff|principal|lead|manager|director|head of)\b/i;
     for (const h of jobPosts.hits ?? []) {
       if (!h.title || !/hiring/i.test(h.title)) continue;
-      if (!/(engineer|swe|developer|software|founding)/i.test(h.title)) continue;
+      if (!DOMAIN_RE.test(h.title) || !LEVEL_RE.test(h.title)) continue;
       if (SENIOR_RE.test(h.title)) continue;
       candidates.push({
         objectID: h.objectID,
@@ -95,14 +99,17 @@ export async function scoutHn(): Promise<ScoutHnResult> {
   }
 
   const client = new Anthropic();
-  const system = `You extract job postings from Hacker News "Who is hiring" comments for a May-2027 CS grad seeking software-engineering NEW GRAD / EARLY CAREER / INTERN roles in San Francisco, NYC, or Remote-US.
+  const levelText = searchConfig().levels.includes("new-grad")
+    ? "INTERNSHIP / CO-OP or NEW GRAD / ENTRY-LEVEL"
+    : "INTERNSHIP / CO-OP";
+  const system = `You extract job postings from Hacker News "Who is hiring" comments for a computer science student seeking ${levelText} roles in embedded systems, firmware, robotics, autonomy, FPGA / digital design, or adjacent hardware engineering, anywhere in the United States (including US-remote).
 
 From each comment, extract postings ONLY when ALL are true:
-- software engineering role (not sales/marketing/recruiting/senior-only)
-- explicitly open to new grads, juniors, early career, or interns (senior-only posts: skip)
-- located in SF Bay Area, NYC, or US-remote
-Include the application URL if one appears in the comment; else null. Use the provided commentId. Return an empty list when nothing qualifies.
-Items marked [HN JOB POST] are YC-startup job posts: extract company from the title (the part before "(YC" or "Is Hiring"); when no location is given, assume "San Francisco, CA". Generic non-senior engineering titles from these startups qualify even without an explicit new-grad tag.`;
+- the role itself is embedded / firmware / robotics / autonomy / controls / perception / FPGA / hardware / electrical, OR it is a general software engineering role at a company whose product is robots, drones, vehicles, spacecraft, chips, or other physical hardware
+- explicitly open to ${levelText.toLowerCase()} candidates (experienced-only posts: skip)
+- located in the US or US-remote
+Use the role title as written (append "Intern" only if the comment says it is an internship). Include the application URL if one appears in the comment; else null. Use the provided commentId. Return an empty list when nothing qualifies.
+Items marked [HN JOB POST] are YC-startup job posts: extract company from the title (the part before "(YC" or "Is Hiring"); when no location is given, use "Unspecified".`;
 
   const found: Array<z.infer<typeof Extracted>["postings"][number]> = [];
   const CHUNK = 12;
@@ -133,7 +140,9 @@ Items marked [HN JOB POST] are YC-startup job posts: extract company from the ti
   const now = new Date();
   const newJobIds: number[] = [];
   for (const p of found) {
-    if (!isTarget(classify(p.location))) continue;
+    const kind = isWantedPosting({ title: p.title, company: p.company, domainBoard: true });
+    if (!kind) continue;
+    if (!isTargetLocation(p.location)) continue;
     if (isBlockedCompany(p.company, { title: p.title })) continue;
     const key = dedupeKey(p.company, p.title, p.location);
     if (existingKeys.has(key)) continue;
@@ -148,7 +157,7 @@ Items marked [HN JOB POST] are YC-startup job posts: extract company from the ti
       .values({
         companyId,
         title: p.title,
-        kind: /intern(ship)?/i.test(p.title) ? "internship" : "new-grad",
+        kind,
         locationRaw: p.location,
         locationClass: classify(p.location),
         applyUrl,

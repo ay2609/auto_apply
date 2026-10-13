@@ -3,7 +3,8 @@ import { sqliteTable, text, integer, uniqueIndex, index } from "drizzle-orm/sqli
 export const JOB_STATUS = ["discovered", "drafted", "applied", "skipped", "rejected", "ghost"] as const;
 export type JobStatus = (typeof JOB_STATUS)[number];
 
-export const LOCATION_CLASS = ["sf", "nyc", "remote_us", "other"] as const;
+/** sf / nyc / remote_us / us = elsewhere in the US / other = non-US or unparseable. */
+export const LOCATION_CLASS = ["sf", "nyc", "remote_us", "us", "other"] as const;
 export type LocationClass = (typeof LOCATION_CLASS)[number];
 
 export const ATS_TYPE = ["greenhouse", "lever", "ashby", "workday", "wellfound", "linkedin", "custom", "unknown"] as const;
