@@ -37,7 +37,7 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
   const open = inArray(jobs.status, ["discovered", "drafted"]);
   const rows =
     view === "inbox"
-      ? await base.where(and(open, isNull(jobs.closedAt))).orderBy(desc(jobs.firstSeenAt)).limit(800)
+      ? await base.where(and(open, isNull(jobs.closedAt))).orderBy(desc(jobs.firstSeenAt)).limit(5000)
       : view === "closed"
         ? await base.where(and(open, isNotNull(jobs.closedAt))).orderBy(desc(jobs.closedAt)).limit(300)
         : await base.where(eq(jobs.status, view)).orderBy(desc(jobs.updatedAt)).limit(300);
