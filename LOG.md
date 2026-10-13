@@ -8,4 +8,5 @@
 - Fixed: scout-found jobs were auto-closed after 24h by the list ingest; `matchOption("")` matched the first option; ambiguous Workday location codes.
 - Bumped better-sqlite3 to 13 (11 fails to build on Node 26).
 - First backfill: 1,043 jobs.
-- Blocked: PR needs `gh auth login` (token invalid). Owner to add API key + fill screening TODOs.
+- Forked to ay2609/auto_apply, opened PR #1 (embedded-robotics → main). Dev server started on 0.0.0.0:3000.
+- Next: owner adds ANTHROPIC_API_KEY to .env.local and fills screening TODOs; then dry-run an apply.

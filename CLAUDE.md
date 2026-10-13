@@ -24,7 +24,7 @@ Avi's fork of gheetdufa/auto_apply, retargeted from new-grad SWE/quant to **ever
 
 ## Current state (2026-10-13)
 - First backfill: 1,043 open internships (634 lists, 207 ATS boards, 202 Workday). Filters pass `pnpm test:discovery`.
-- Not yet done: owner's API key in `.env.local`; TODOs in `data/screening-answers.json` (work auth, sponsorship, citizenship, clearance, start date, term); `contact.json` location blank; watcher (launchd) not installed; PR blocked on `gh auth login`.
+- Not yet done: owner's API key in `.env.local`; TODOs in `data/screening-answers.json` (work auth, sponsorship, citizenship, clearance, start date, term); `contact.json` location blank; watcher (launchd) not installed. PR open: https://github.com/ay2609/auto_apply/pull/1 (fork remote `fork`, branch `embedded-robotics`; push over HTTPS via gh credential helper, see ~/code/TOOLS.md).
 
 ## Next steps
 - Owner adds key + screening answers → try `pnpm apply:dry <id>` on a Greenhouse job, then a real apply.
