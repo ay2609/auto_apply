@@ -51,7 +51,7 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
         <div>
           <h1 className="text-2xl font-semibold">auto-apply</h1>
           <p className="text-[color:var(--color-muted)] text-sm mt-1">
-            New-grad SWE + internships · SF / NYC / Remote-US · sorted by release
+            Embedded · firmware · robotics · FPGA · hardware internships · anywhere in the US · sorted by release
           </p>
         </div>
         <div className="flex items-center gap-4">

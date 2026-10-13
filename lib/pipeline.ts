@@ -4,8 +4,8 @@ import { eq } from "drizzle-orm";
 import { runIngest, type IngestResult } from "@/lib/ingest/run";
 import { scoutBoards, type ScoutBoardsResult } from "@/lib/scout/boards";
 import { scoutHn, type ScoutHnResult } from "@/lib/scout/hn";
-import { scoutRemote, type ScoutRemoteResult } from "@/lib/scout/remote";
 import { scoutGoogleCareers, type ScoutGoogleResult } from "@/lib/scout/google";
+import { scoutWorkday, type ScoutWorkdayResult } from "@/lib/scout/workday";
 import { enrichJob } from "@/lib/enrich";
 import { draftJobById } from "@/lib/tailor/draft-job";
 import { tailoringReady } from "@/lib/tailor/generate";
@@ -16,8 +16,8 @@ export type PipelineResult = {
   scout: {
     boards?: ScoutBoardsResult;
     hn?: ScoutHnResult;
-    remote?: ScoutRemoteResult;
     google?: ScoutGoogleResult;
+    workday?: ScoutWorkdayResult;
     error?: string;
   };
   enriched: number;
@@ -28,11 +28,12 @@ export type PipelineResult = {
 
 /**
  * The full loop: ingest all sources → detect newly released jobs →
- * enrich each (final URL, ATS, JD, real form questions) → auto-draft
- * when API key + profile are configured → macOS notification.
+ * enrich each (final URL, ATS, JD, real form questions) → optionally
+ * pre-draft form answers (AUTO_DRAFT=1) → macOS notification.
  *
- * Backfill runs (first ingest / mass insert) skip enrich/draft/notify —
- * those jobs get enriched lazily when opened in the UI.
+ * Drafting is off by default: applying drafts on demand, so discovery spends
+ * no API tokens. Backfill runs (first ingest / mass insert) skip
+ * enrich/draft/notify — those jobs get enriched lazily when opened in the UI.
  */
 export async function runPipeline(opts: { notify: boolean }): Promise<PipelineResult> {
   const ingest = await runIngest();
@@ -47,19 +48,19 @@ export async function runPipeline(opts: { notify: boolean }): Promise<PipelineRe
     const hn = await scoutHn();
     result.scout.hn = hn;
     newIds.push(...hn.newJobIds); // HN volume is small; backfill flag rarely trips
-    const remote = await scoutRemote();
-    result.scout.remote = remote;
-    newIds.push(...remote.newJobIds);
     const google = await scoutGoogleCareers();
     result.scout.google = google;
     newIds.push(...google.newJobIds);
+    const workday = await scoutWorkday();
+    result.scout.workday = workday;
+    newIds.push(...workday.newJobIds);
   } catch (e) {
     result.scout.error = e instanceof Error ? e.message : String(e);
   }
 
   if (newIds.length === 0) return result;
 
-  const ready = tailoringReady();
+  const ready = { ok: process.env.AUTO_DRAFT === "1" && tailoringReady().ok };
   // Enrich + draft in small parallel batches — slow career sites must not serialize the run.
   const BATCH = 5;
   for (let i = 0; i < newIds.length; i += BATCH) {

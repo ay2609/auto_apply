@@ -20,20 +20,19 @@ data/db.sqlite-journal
 data/auto-apply.db
 data/auto-apply.db-*
 data/resume.pdf
-data/resume-internship.pdf
 data/transcript.pdf
 data/*Transcript*.pdf
-data/resumes/
 data/profile.md
 data/contact.json
+data/screening-answers.json
 data/apply/
 data/watch.log
 data/cache/
 data/scout-state.json
-data/github-projects.json
 
 # personal resume copies at repo root
 Resume_*.pdf
+*Resume*.pdf
 
 # local tool state
 .claude/settings.local.json

@@ -13,22 +13,25 @@ async function main() {
   console.log(`  new (lists): ${ingest.newJobs}${ingest.seededFromNewSources ? ` · +${ingest.seededFromNewSources} seeded (new sources)` : ""}`);
   if (scout.boards) {
     console.log(
-      `  scout ATS:   ${scout.boards.boards} boards · ${scout.boards.postingsSeen} postings · +${scout.boards.newJobIds.length} new${scout.boards.backfill ? " (backfill)" : ""} · +${scout.boards.seeded} seeded · +${scout.boards.ambientNew} ambient`,
+      `  scout ATS:   ${scout.boards.boards} boards · ${scout.boards.postingsSeen} postings · ${scout.boards.matched} match · +${scout.boards.newJobIds.length} new${scout.boards.backfill ? " (backfill)" : ""} · +${scout.boards.seeded} seeded · ${scout.boards.closed} closed`,
     );
     if (scout.boards.discovery) {
       const d = scout.boards.discovery;
-      console.log(`  discovery:   probed ${d.probed} YC cos · ${d.hits} boards found · ${d.queueRemaining} queued`);
+      console.log(`  discovery:   probed ${d.probed} YC robotics/hardware cos · ${d.hits} boards found · ${d.queueRemaining} queued`);
     }
   }
   if (scout.hn && !scout.hn.skipped) {
     console.log(`  scout HN:    ${scout.hn.commentsScanned} comments · ${scout.hn.matched} matched · +${scout.hn.newJobIds.length} new`);
   }
-  if (scout.remote && !scout.remote.skipped) {
-    console.log(`  scout remote: ${scout.remote.seen} postings · +${scout.remote.newJobIds.length} new · +${scout.remote.seeded} seeded`);
+  if (scout.workday && !scout.workday.skipped) {
+    const w = scout.workday;
+    console.log(
+      `  scout workday: ${w.tenants} tenants · ${w.seen} intern postings · ${w.matched} match · +${w.newJobIds.length} new · +${w.seeded} seeded · ${w.closed} closed${w.failed.length ? ` · failed: ${w.failed.join(", ")}` : ""}`,
+    );
   }
   if (scout.google && !scout.google.skipped) {
     console.log(
-      `  scout google: ${scout.google.seen} early-career cards · +${scout.google.newJobIds.length} new · +${scout.google.seeded} seeded`,
+      `  scout google: ${scout.google.seen} cards · +${scout.google.newJobIds.length} new · +${scout.google.seeded} seeded`,
     );
   }
   if (scout.error) console.log(`  scout error: ${scout.error}`);

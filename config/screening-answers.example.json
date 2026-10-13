@@ -1,0 +1,21 @@
+{
+  "_comment": "Copy to data/screening-answers.json (gitignored) and fill in. Used verbatim for screening questions. Anything left as TODO blocks auto-apply until filled; set a value to \"\" to have it ignored.",
+  "work_authorization_us": "TODO: start with Yes or No, e.g. Yes, authorized to work in the US; no sponsorship required now or in the future.",
+  "requires_sponsorship": "TODO: Yes / No (start with the word, the form filler keys off it)",
+  "us_citizen": "TODO: Yes / No (many defense and aerospace roles require US citizenship)",
+  "security_clearance": "TODO: e.g. None, but eligible to obtain",
+  "earliest_start_date": "TODO: e.g. May 2027 for summer internships",
+  "internship_term": "TODO: e.g. Summer 2027; also open to Fall 2027 co-op",
+  "graduation_date": "TODO: e.g. May 2028, B.S. Computer Science",
+  "gpa": "TODO",
+  "willing_to_relocate": "Yes, open to relocating anywhere in the US.",
+  "remote_preference": "Prefer in-person or hybrid, especially for hardware and robotics work.",
+  "compensation_expectations": "Open; happy to discuss market rate for the role.",
+  "in_office_policy_confirm": "Yes",
+  "export_control_sanctions": "None of the above",
+  "gender": "prefer not to say",
+  "ethnicity": "prefer not to say",
+  "veteran_status": "I am not a protected veteran",
+  "disability_status": "prefer not to say",
+  "referral_source": "Company careers page"
+}

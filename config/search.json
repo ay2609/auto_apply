@@ -1,0 +1,6 @@
+{
+  "_comment": "What the pipeline hunts for. levels: 'internship' (includes co-ops) and/or 'new-grad' (entry-level full-time). excludeGradOnly drops PhD/Masters-only postings. includeUnknownLocation keeps postings whose location can't be parsed (e.g. Workday '3 Locations').",
+  "levels": ["internship"],
+  "excludeGradOnly": true,
+  "includeUnknownLocation": true
+}

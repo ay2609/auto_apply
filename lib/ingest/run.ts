@@ -5,26 +5,16 @@ import { SOURCES, rawUrl, type RepoSource } from "./sources";
 import { parseTables, parseHtmlTables } from "./markdown-table";
 import { normalizeRow, type RawJobRow } from "./row-normalizer";
 import { dedupeKey, coarseKey, normalizeCompany } from "./dedupe";
-import { classify, isTarget, isQuantHub } from "./location";
+import { classify, isTargetLocation } from "./location";
 import { isBlockedCompany } from "./blocklist";
 import { detectAts } from "../ats/detect";
 import { loadCoarseKeys } from "../scout/coarse";
-import { parseNuft, type NuftBoard } from "./nuft";
-import { addExtraBoards } from "../scout/discover";
-
-export const SWE_TITLE_RE =
-  /\b(software\s*engineer|swe|sde|software\s*developer|backend|frontend|full[\s-]?stack|infra|infrastructure|platform|systems|mle|ml\s*engineer|ai\s*engineer|data\s*engineer|new\s*grad|intern(ship)?|university|college)\b/i;
-
-export const NEGATIVE_TITLE_RE =
-  /\b(sales|marketing|recruit(er|ing)|hr\b|human resources|finance|accounting|legal|admin|customer support|operations|teacher|nurse|paralegal|janitor)\b/i;
-
-export const QUANT_TITLE_RE =
-  /\b(quant(itative)?\s*(researcher|research|trader|trading|trade|developer|dev|analyst|strategist|engineer)|quant\b|trading\s*(analyst|engineer|associate)|algorithmic\s*trad|systematic\s*trad)\b/i;
+import { isWantedPosting, searchConfig } from "../target";
 
 /** More new jobs than this in one run = treat as backfill (don't notify/auto-draft). */
 export const BACKFILL_THRESHOLD = 50;
 
-type CollectedRow = RawJobRow & { sources: string[]; kind: JobKind; quantFirm?: boolean };
+type CollectedRow = RawJobRow & { sources: string[]; kind: JobKind };
 
 export type PerSourceStats = Record<string, { rowsSeen: number; rowsKept: number; error?: string }>;
 
@@ -51,37 +41,12 @@ export async function runIngest(): Promise<IngestResult> {
   /** Keys of rows explicitly marked closed (🔒) in a source this run. */
   const explicitlyClosed = new Set<string>();
 
-  const nuftBoards: NuftBoard[] = [];
   for (const src of SOURCES) {
     perSource[src.key] = { rowsSeen: 0, rowsKept: 0 };
     try {
       const md = await fetchReadme(src);
       let kept = 0;
       let seen = 0;
-
-      // NUFT quant repos use per-firm sections, not one big table.
-      if (src.key.startsWith("nuft-")) {
-        const parsed = parseNuft(md);
-        nuftBoards.push(...parsed.boards);
-        for (const row of parsed.rows) {
-          seen += 1;
-          const isQuant = QUANT_TITLE_RE.test(row.title);
-          if (NEGATIVE_TITLE_RE.test(row.title) && !isQuant) continue;
-          if (!SWE_TITLE_RE.test(row.title) && !isQuant) continue;
-          const key = dedupeKey(row.company, row.title, row.locationRaw);
-          const existing = collected.get(key);
-          if (existing) {
-            if (!existing.sources.includes(src.key)) existing.sources.push(src.key);
-          } else {
-            // quantFirm: SWE-type roles at these firms deserve the quant-hub
-            // location exception too (Optiver SWE in Chicago/Austin etc.).
-            collected.set(key, { ...row, postedDate: null, isClosed: false, sources: [src.key], kind: src.kind, quantFirm: true });
-          }
-          kept += 1;
-        }
-        perSource[src.key] = { rowsSeen: seen, rowsKept: kept };
-        continue;
-      }
 
       const tableIter = function* () {
         yield* parseTables(md);
@@ -97,9 +62,9 @@ export async function runIngest(): Promise<IngestResult> {
           if (!row) continue;
           if (isSubRow && lastCompany) row.company = lastCompany;
           else lastCompany = row.company;
-          const isQuant = QUANT_TITLE_RE.test(row.title);
-          if (NEGATIVE_TITLE_RE.test(row.title) && !isQuant) continue;
-          if (!SWE_TITLE_RE.test(row.title) && !isQuant) continue;
+          const kind = isWantedPosting({ title: row.title, company: row.company, listKind: src.kind });
+          if (!kind) continue;
+          if (row.advancedDegree && searchConfig().excludeGradOnly) continue;
 
           const key = dedupeKey(row.company, row.title, row.locationRaw);
           if (row.isClosed) {
@@ -109,10 +74,10 @@ export async function runIngest(): Promise<IngestResult> {
           const existing = collected.get(key);
           if (existing) {
             if (!existing.sources.includes(src.key)) existing.sources.push(src.key);
-            // A job in both an internship and a new-grad list counts as new-grad.
-            if (src.kind === "new-grad") existing.kind = "new-grad";
+            // A job in any internship list is an internship.
+            if (kind === "internship") existing.kind = "internship";
           } else {
-            collected.set(key, { ...row, sources: [src.key], kind: src.kind });
+            collected.set(key, { ...row, sources: [src.key], kind });
           }
           kept += 1;
         }
@@ -123,20 +88,12 @@ export async function runIngest(): Promise<IngestResult> {
     }
   }
 
-  // Feed quant firms' board URLs to the scout — postings get caught the moment
-  // they drop, not when the README updates.
-  if (nuftBoards.length > 0) addExtraBoards(nuftBoards);
-
   const totalRowsSeen = Object.values(perSource).reduce((s, x) => s + x.rowsSeen, 0);
   const now = new Date();
 
-  // Target-location rows only (quant roles also admitted from quant hubs like
-  // Chicago), split into new vs. already-known using one pass over existing keys.
+  // US-located rows only, split into new vs. already-known using one pass over existing keys.
   const targets = [...collected.entries()].filter(
-    ([, row]) =>
-      !isBlockedCompany(row.company, { title: row.title }) &&
-      (isTarget(classify(row.locationRaw)) ||
-        ((QUANT_TITLE_RE.test(row.title) || row.quantFirm === true) && isQuantHub(row.locationRaw))),
+    ([, row]) => !isBlockedCompany(row.company, { title: row.title }) && isTargetLocation(row.locationRaw),
   );
   const existingByKey = new Map(
     db
@@ -217,17 +174,20 @@ export async function runIngest(): Promise<IngestResult> {
     closedJobs += explicitCloseIds.length;
   }
 
-  const allSourcesHealthy = Object.values(perSource).every((s) => !s.error && s.rowsKept > 0);
+  // Healthy = fetched and parsed rows (kept may legitimately be 0 after the embedded filter).
+  const allSourcesHealthy = Object.values(perSource).every((s) => !s.error && s.rowsSeen > 0);
   if (allSourcesHealthy && !backfill) {
     const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     const vanished = db
-      .select({ id: jobs.id, dedupeKey: jobs.dedupeKey })
+      .select({ id: jobs.id, dedupeKey: jobs.dedupeKey, sourceRepos: jobs.sourceRepos })
       .from(jobs)
       .where(
         sql`${jobs.closedAt} IS NULL AND ${jobs.status} IN ('discovered','drafted') AND ${jobs.lastSeenAt} < ${dayAgo.getTime()}`,
       )
       .all()
-      .filter((j) => !seenKeys.has(j.dedupeKey));
+      // Only list-sourced jobs can vanish from the lists; scout-found jobs are
+      // closed by their own scout when the posting leaves its board.
+      .filter((j) => !seenKeys.has(j.dedupeKey) && isListSourced(j.sourceRepos));
     if (vanished.length > 0) {
       await db
         .update(jobs)
@@ -259,6 +219,10 @@ export async function runIngest(): Promise<IngestResult> {
     uniqueCandidates: collected.size,
     perSource,
   };
+}
+
+function isListSourced(sourceRepos: string[] | null): boolean {
+  return (sourceRepos ?? []).some((s) => !s.startsWith("scout:"));
 }
 
 async function fetchReadme(src: RepoSource): Promise<string> {

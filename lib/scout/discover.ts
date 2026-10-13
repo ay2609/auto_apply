@@ -5,96 +5,52 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
  * scout isn't limited to companies already in the DB.
  *
  * Source: yc-oss/api — daily-updated static JSON of all YC companies with an
- * isHiring flag (~1.5k hiring). We filter to US-relevant ones and probe each
- * company's likely Greenhouse/Lever/Ashby board slug. Results (hits AND
- * misses) persist in data/scout-state.json, so probing spreads across watcher
- * runs at a bounded request budget until the queue is drained; new YC batches
- * get picked up as they appear.
+ * isHiring flag (~1.5k hiring). We keep only robotics / hardware / aerospace /
+ * defense / manufacturing / devices startups and probe each company's likely
+ * Greenhouse/Lever/Ashby board slug. Discovered boards are "domain" boards:
+ * their generic SWE internships count as on-target. Results (hits AND misses)
+ * persist in data/scout-state.json, so probing spreads across watcher runs at
+ * a bounded request budget; new YC batches get picked up as they appear.
  */
 
 const STATE_PATH = "./data/scout-state.json";
 const YC_HIRING_URL = "https://yc-oss.github.io/api/companies/hiring.json";
 const YC_REFETCH_MS = 6 * 60 * 60 * 1000;
-const PROBE_BUDGET_PER_RUN = 20; // companies per run (≤ ~9 requests each)
+const PROBE_BUDGET_PER_RUN = 40; // companies per run (≤ ~9 requests each)
+
+/** YC tags / industries that mark a robotics or embedded-hardware company. */
+const YC_DOMAIN_RE =
+  /(?<!process )\b(robot\w*|hardware|hard tech|manufactur\w*|aviation|space|aerospace|satellites?|defense|drones?|automotive|electric vehicles?|electronics|iot|semiconductors?|medical (?:devices?|robotics)|3d printing|autonomous|unmanned|nanosensors?|edge computing)\b/i;
 
 export type DiscoveredBoard = {
   ats: "greenhouse" | "lever" | "ashby";
   token: string;
   company: string;
-  startup: true;
+  /** Robotics/embedded-native board: generic engineering internships count. */
+  domain: true;
 };
 
 type ScoutState = {
   lastHnScanAt?: number;
-  lastRemoteScanAt?: number;
   lastGoogleScanAt?: number;
+  lastWorkdayScanAt?: number;
+  /** Workday tenants that completed at least one scan (first scan seeds quietly). */
+  workdayScanned?: string[];
   lastYcFetchAt?: number;
   ycQueue?: Array<{ name: string; slug: string; website?: string }>;
   /** company slug → discovered board, or null when all probes missed */
   ycProbed?: Record<string, DiscoveredBoard | null>;
   /** "ats:token" keys of boards that have completed at least one poll. */
   polledBoards?: string[];
-  /** One-time flag: quant firm seeds pushed into the probe queue. */
-  quantSeeded?: boolean;
-  /** Boards registered by ingests (NUFT firm websites etc.). */
+  /** Boards registered by other sources. */
   extraBoards?: DiscoveredBoard[];
 };
 
 export type DiscoverResult = { probed: number; hits: number; queueRemaining: number };
 
-/**
- * Quant firms — hand-curated probe seeds (they aren't in the YC list and their
- * campus roles drop in one seasonal burst). Probed once like YC companies;
- * whichever have public GH/Lever/Ashby boards join the watch list.
- */
-const QUANT_SEEDS: Array<{ name: string; slug: string }> = [
-  { name: "Hudson River Trading", slug: "wehrtyou" },
-  { name: "Jump Trading", slug: "jumptrading" },
-  { name: "Two Sigma", slug: "twosigma" },
-  { name: "Optiver", slug: "optiver" },
-  { name: "IMC Trading", slug: "imc" },
-  { name: "DRW", slug: "drweng" },
-  { name: "Akuna Capital", slug: "akunacapital" },
-  { name: "Five Rings", slug: "fiverings" },
-  { name: "Tower Research Capital", slug: "towerresearchcapital" },
-  { name: "Old Mission", slug: "oldmissioncapital" },
-  { name: "Belvedere Trading", slug: "belvederetrading" },
-  { name: "Chicago Trading Company", slug: "chicagotrading" },
-  { name: "XTX Markets", slug: "xtxmarkets" },
-  { name: "Squarepoint Capital", slug: "squarepoint" },
-  { name: "Radix Trading", slug: "radixtrading" },
-  { name: "Headlands Technologies", slug: "headlandstech" },
-  { name: "PEAK6", slug: "peak6" },
-  { name: "Flow Traders", slug: "flowtraders" },
-  { name: "Millennium", slug: "millennium" },
-  { name: "Point72", slug: "point72" },
-  { name: "Balyasny Asset Management", slug: "balyasny" },
-  { name: "Schonfeld", slug: "schonfeld" },
-  { name: "Voleon", slug: "voleon" },
-  { name: "PDT Partners", slug: "pdtpartners" },
-  { name: "Geneva Trading", slug: "genevatrading" },
-  { name: "DV Trading", slug: "dvtrading" },
-  { name: "TransMarket Group", slug: "transmarketgroup" },
-  { name: "Wolverine Trading", slug: "wolverinetrading" },
-  { name: "Group One Trading", slug: "grouponetrading" },
-  { name: "Aquatic Capital Management", slug: "aquaticcapital" },
-];
-
 export async function discoverYcBoards(): Promise<DiscoverResult> {
   const state = loadState();
   state.ycProbed ??= {};
-
-  // One-time: put quant firms at the FRONT of the probe queue (season is live).
-  const probedSoFar = state.ycProbed;
-  if (!state.quantSeeded) {
-    const queued = new Set((state.ycQueue ?? []).map((q) => q.slug));
-    state.ycQueue = [
-      ...QUANT_SEEDS.filter((q) => !queued.has(q.slug) && !(q.slug in probedSoFar)),
-      ...(state.ycQueue ?? []),
-    ];
-    state.quantSeeded = true;
-    saveState(state);
-  }
 
   // Refresh the hiring list periodically; enqueue companies we haven't probed.
   if (Date.now() - (state.lastYcFetchAt ?? 0) > YC_REFETCH_MS) {
@@ -105,13 +61,23 @@ export async function discoverYcBoards(): Promise<DiscoverResult> {
         slug: string;
         website?: string;
         all_locations?: string;
+        regions?: string[];
         status?: string;
+        industry?: string;
+        subindustry?: string;
+        industries?: string[];
+        tags?: string[];
       }>;
-      const US_RE = /(san francisco|bay area|new york|nyc|remote|united states|palo alto|mountain view|oakland|brooklyn)/i;
+      const US_RE = /(united states|america|remote|, [A-Z]{2}\b|usa)/i;
+      const isDomain = (c: (typeof companies)[number]) =>
+        [c.industry, c.subindustry, ...(c.industries ?? []), ...(c.tags ?? [])].some(
+          (t) => !!t && YC_DOMAIN_RE.test(t),
+        );
       const fresh = companies.filter(
         (c) =>
           c.status !== "Inactive" &&
-          (!c.all_locations || US_RE.test(c.all_locations)) &&
+          isDomain(c) &&
+          (!c.all_locations || US_RE.test(c.all_locations) || (c.regions ?? []).some((r) => /america|remote/i.test(r))) &&
           !(c.slug in state.ycProbed!),
       );
       const queued = new Set((state.ycQueue ?? []).map((q) => q.slug));
@@ -148,7 +114,7 @@ export function getDiscoveredBoards(): DiscoveredBoard[] {
   return [...probed, ...(state.extraBoards ?? [])];
 }
 
-/** Register boards found by other ingests (e.g. NUFT quant firm websites). */
+/** Register boards found by other sources. */
 export function addExtraBoards(boards: Array<{ ats: "greenhouse" | "lever" | "ashby"; token: string; company: string }>): number {
   const state = loadState();
   const existing = new Set(
@@ -161,7 +127,7 @@ export function addExtraBoards(boards: Array<{ ats: "greenhouse" | "lever" | "as
     const key = `${b.ats}:${b.token.toLowerCase()}`;
     if (existing.has(key)) continue;
     existing.add(key);
-    state.extraBoards = [...(state.extraBoards ?? []), { ...b, startup: true }];
+    state.extraBoards = [...(state.extraBoards ?? []), { ...b, domain: true }];
     added += 1;
   }
   if (added > 0) saveState(state);
@@ -187,15 +153,15 @@ async function probeCompany(c: { name: string; slug: string; website?: string })
     ]);
     if (gh.status === "fulfilled" && gh.value.ok) {
       const data = (await gh.value.json().catch(() => null)) as { jobs?: unknown[] } | null;
-      if (data?.jobs) return { ats: "greenhouse", token, company: c.name, startup: true };
+      if (data?.jobs) return { ats: "greenhouse", token, company: c.name, domain: true };
     }
     if (lv.status === "fulfilled" && lv.value.ok) {
       const data = (await lv.value.json().catch(() => null)) as unknown;
-      if (Array.isArray(data)) return { ats: "lever", token, company: c.name, startup: true };
+      if (Array.isArray(data)) return { ats: "lever", token, company: c.name, domain: true };
     }
     if (ab.status === "fulfilled" && ab.value.ok) {
       const data = (await ab.value.json().catch(() => null)) as { jobs?: unknown[] } | null;
-      if (data?.jobs) return { ats: "ashby", token, company: c.name, startup: true };
+      if (data?.jobs) return { ats: "ashby", token, company: c.name, domain: true };
     }
   }
   return null;

@@ -30,6 +30,10 @@ export async function fetchJdFromPage(followed: FetchedPage, atsHint: AtsType): 
     const text = await tryAshby(followed.url);
     if (text) return { text, finalUrl: followed.url, ats };
   }
+  if (ats === "workday") {
+    const text = await tryWorkday(followed.url);
+    if (text) return { text, finalUrl: followed.url, ats };
+  }
 
   const text = extractReadable(followed.html, followed.url);
   return { text, finalUrl: followed.url, ats };
@@ -106,6 +110,29 @@ async function tryAshby(url: string): Promise<string | null> {
   const job = data.jobs?.find((j) => j.id === id);
   if (!job?.descriptionPlain) return null;
   return `${job.title} · ${job.location ?? ""}\n\n${job.descriptionPlain}`.trim();
+}
+
+/**
+ * Workday career pages are JS-rendered; the public CXS JSON API serves the JD.
+ * https://<tenant>.wdN.myworkdayjobs.com/[en-US/]<site>/job/<loc>/<slug>
+ *   → GET https://<host>/wday/cxs/<tenant>/<site>/job/<loc>/<slug>
+ */
+async function tryWorkday(url: string): Promise<string | null> {
+  const m = url.match(/^https?:\/\/(([a-z0-9-]+)\.wd\d+\.myworkdayjobs\.com)\/(?:[a-z]{2}-[A-Z]{2}\/)?([^/?#]+)(\/job\/[^?#]+)/);
+  if (!m) return null;
+  const [, host, tenant, site, path] = m;
+  const res = await fetch(`https://${host}/wday/cxs/${tenant}/${site}${path}`, {
+    headers: { "User-Agent": UA, Accept: "application/json" },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  }).catch(() => null);
+  if (!res?.ok) return null;
+  const data = (await res.json().catch(() => null)) as {
+    jobPostingInfo?: { title?: string; location?: string; jobDescription?: string };
+  } | null;
+  const info = data?.jobPostingInfo;
+  const plain = stripTags(decodeEntities(info?.jobDescription ?? ""));
+  if (!plain) return null;
+  return `${[info?.title, info?.location].filter(Boolean).join(" · ")}\n\n${plain}`.trim();
 }
 
 function extractReadable(html: string, baseUrl: string): string {

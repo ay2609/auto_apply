@@ -1,6 +1,8 @@
-# auto-apply
+# auto-apply (embedded / robotics edition)
 
-A local job-search pipeline for new-grad and internship SWE roles. It watches public job lists and ATS boards, surfaces **new postings the moment they appear**, writes **tailored application drafts** keyed to each job's real form questions, and can **auto-fill and submit** applications through Playwright.
+A local job-search pipeline that finds **every embedded systems, firmware, robotics, autonomy, FPGA and hardware internship in the US** it can reach, surfaces new postings the moment they appear, and can auto-fill and submit applications through Playwright, always with **one fixed resume** (no per-job resume tailoring).
+
+Forked from [gheetdufa/auto_apply](https://github.com/gheetdufa/auto_apply) (a new-grad SWE / quant tool) and retargeted.
 
 Everything runs on your machine. The database, profile, resume, and application history stay local.
 
@@ -8,15 +10,24 @@ Everything runs on your machine. The database, profile, resume, and application 
 
 | Stage | What happens |
 |-------|----------------|
-| **Ingest** | Pulls 8 GitHub-maintained job lists (SimplifyJobs, speedyapply, NUFT quant repos, etc.), dedupes across sources, filters to SF / NYC / Remote-US SWE and quant roles |
-| **Scout** | Polls company ATS boards directly (Greenhouse, Lever, Ashby, SmartRecruiters, Workable), discovers YC startup boards, scans HN "Who's Hiring", and checks Remotive for remote early-career roles |
-| **Blocklist** | Drops mega-cap senior/generic roles via `config/company-blocklist.json`. **Early-career / new-grad / university titles are excepted** (NVIDIA new grad, Google Career Catalyst, etc. still surface) |
-| **Enrich** | Follows redirect URLs, detects the real ATS, fetches the job description, and pulls the actual application-form questions |
-| **Draft** | Claude writes a cover letter plus an answer for every form field, using your profile and canonical screening answers |
-| **Apply** | Playwright opens a headed browser, reads the live form, fills every field, attaches your resume, and submits (or stops before submit if `AUTO_SUBMIT=0`) |
-| **Notify** | macOS notification when new jobs land: `auto-apply: 3 new jobs — Nuro — SWE New Grad, +2 more — 3 drafted` |
+| **Ingest** | Pulls the big GitHub internship lists (SimplifyJobs Summer 2027 + off-season co-ops, vanshb03, zapplyjobs, speedyapply), keeps only embedded / robotics / hardware rows located in the US |
+| **Scout: ATS boards** | Polls Greenhouse / Lever / Ashby boards of robotics, drone, aerospace, defense and chip companies directly (catches postings before the lists update), plus boards auto-discovered for hiring YC robotics / hardware / aerospace startups |
+| **Scout: Workday** | Searches the Workday career sites of defense primes, semiconductor companies, automakers and med-device makers (NVIDIA, Northrop, Boeing, Medtronic, …) for intern / co-op postings |
+| **Scout: Google, HN** | Google Careers intern search for embedded / hardware / silicon roles; HN "Who's hiring" hardware posts (HN needs an API key) |
+| **Enrich** | Follows redirects, detects the real ATS, fetches the job description and the actual application-form questions |
+| **Draft** (on demand) | Claude answers every form field (plus a short cover letter) from your profile and screening answers. Your resume is never modified |
+| **Apply** | Playwright opens a headed browser, reads the live form, fills every field, attaches `data/resume.pdf`, and submits (or stops before submit if `AUTO_SUBMIT=0`) |
 
-The inbox is sorted by **release time** (`firstSeenAt`), not when you happened to open the app. A 870-job backfill on first run is normal; focus on **New today** and star/skip from there.
+## What counts as a match
+
+All filtering lives in one place, `lib/target.ts`, and every source uses it:
+
+- **Role**: the title mentions embedded, firmware, robotics, autonomy, ROS, controls, GNC, flight software, avionics, FPGA / RTL / ASIC / digital design, hardware, electrical, PCB, silicon, drivers / kernel / BSP, RTOS / real-time, perception / SLAM / state estimation, lidar / radar, drones / UAV, spacecraft / satellites, ADAS, DSP / RF, GPU / CUDA, and similar.
+- **Or the company is robotics / aerospace / defense-native** (`config/target-companies.json`, the curated boards, and names like "… Robotics", "… Aerospace", "… Space", "… Defense"). There, any engineering internship counts (e.g. *Software Engineer Intern* at Anduril), except web / frontend / IT / ops / mechanical-type titles.
+- **Level**: internships and co-ops by default. Set `"levels": ["internship", "new-grad"]` in `config/search.json` to include entry-level full-time. PhD / Masters-only roles are dropped (`excludeGradOnly`).
+- **Location**: anywhere in the US, plus US-remote. Postings with no parseable location ("3 Locations") are kept (`includeUnknownLocation`).
+
+Check the filters any time with `pnpm test:discovery` (unit cases + live per-source counts).
 
 ## Stack
 
@@ -26,144 +37,87 @@ Next.js 15 (App Router) · React 19 · Tailwind v4 · Drizzle + SQLite · Anthro
 
 ```bash
 pnpm install
-pnpm db:push                                # creates data/db.sqlite from schema
-cp .env.local.example .env.local            # add ANTHROPIC_API_KEY
-cp data/profile.md.template data/profile.md # fill in your background
-cp resume/resume.pdf data/resume.pdf        # or use your own PDF
-pnpm ingest                                 # first run = silent backfill of current listings
-pnpm watcher:install                        # optional: launchd ingest every 15 min
-pnpm dev                                    # http://localhost:3000
+pnpm db:push                                              # creates data/db.sqlite
+cp .env.local.example .env.local                          # add ANTHROPIC_API_KEY
+cp data/profile.md.template data/profile.md               # your background (drafts are grounded in this)
+cp config/screening-answers.example.json data/screening-answers.json   # work auth, start date, EEOC…
+cp ~/path/to/YourResume.pdf data/resume.pdf               # the ONE resume every application gets
+pnpm ingest                                               # first run = quiet backfill of everything currently open
+pnpm watcher:install                                      # optional: launchd ingest every 15 min
+pnpm dev                                                  # http://localhost:3000
 ```
 
-The UI shows a setup banner until `.env.local`, `profile.md`, and `resume.pdf` exist.
+Also create `data/contact.json` (name, email, phone, linkedin, github, website, school, degree, discipline, graduation, gpa); it fills identity fields verbatim.
 
-**One-time config files:**
+Discovery needs **no API key**. The key is needed for drafting answers, auto-apply's field resolver, and the HN scout. Auto-apply refuses to run while `data/screening-answers.json` still has `TODO` values.
 
-- `data/profile.md` — your background; drafts are grounded in this
-- `data/contact.json` — name, email, phone, LinkedIn, GitHub, etc. (used by auto-apply for identity fields)
-- `data/github-projects.json` — role-tagged GitHub catalog from `pnpm github:sync` (optional; drafts pick better projects per role when present)
-- `config/screening-answers.json` — canonical answers for work auth, comp, start date, EEOC prefs (used verbatim on select fields)
-- `config/company-blocklist.json` — companies to exclude entirely (normalized name matching)
-
-For a training-wheels period, set `AUTO_SUBMIT=0` in `.env.local`. The browser fills everything but leaves the final Submit click to you.
+Optional `.env.local` settings: `AUTO_SUBMIT=0` (fill but don't click Submit), `AUTO_DRAFT=1` (pre-draft answers for every newly released job; off by default to save tokens), `ANTHROPIC_MODEL`.
 
 ## How the pipeline works
 
 Every 15 minutes (launchd watcher) or on **Refresh** in the UI:
 
-1. **Ingest** fetches all source READMEs. Rows are filtered by title (SWE/quant, no sales/HR), location (SF, NYC, remote US, or quant hubs like Chicago/Austin for quant firms), and company blocklist. Jobs explicitly marked closed (🔒) in a source are closed immediately; jobs missing from every source for 24h+ are auto-closed.
-
-2. **Scout** runs five keyless discovery streams:
-   - **ATS boards**: polls boards for every known company (~140+ boards, thousands of postings per run). Catches postings before GitHub lists update. Mega-tech boards are polled too; only early-career titles pass the blocklist exception.
-   - **YC discovery**: probes actively-hiring YC companies for Greenhouse/Lever/Ashby boards (20 companies per run, cached in `data/scout-state.json`).
-   - **HN**: "Who is hiring" comments plus front-page YC job posts (Algolia + Claude extraction, at most 2×/day).
-   - **Remotive**: remote-US software-dev feed, early-career filtered (at most 2×/day).
-   - **Google Careers**: early-career US SWE results pages (HTML), for roles like Career Catalyst that never hit Greenhouse or the GitHub lists (at most ~4×/day).
-
-   Two admission tiers: titles that say new-grad/intern/junior get notify + auto-draft. Generic SWE titles at startups enter quietly ("ambient": visible in inbox, no API spend). A board's first poll seeds quietly; only deltas from already-watched boards count as new releases.
-
-3. **Delta detection**: a job is "released" the first time it appears in any source. The first-ever run (or any insert of 50+ jobs) is treated as backfill: stored, but no notifications or drafts.
-
-4. **Enrich + draft** (new releases only): follow redirects, detect ATS, fetch JD, fetch real form questions (Greenhouse API; canonical fallback for others), then Claude drafts cover letter + per-field answers.
-
-5. **Notify** via macOS `osascript`.
+1. **Ingest** fetches the list READMEs; rows go through the role / level / location filters. Jobs marked closed (🔒) close immediately; list jobs missing from every list for 24h+ auto-close.
+2. **Scout** polls ATS boards every run (first poll of a board seeds quietly; afterwards only deltas count as new; jobs that leave a board are closed), Workday every 3h, Google every 6h, HN twice a day. YC discovery probes 40 robotics / hardware startups per run until the queue is drained.
+3. **Delta detection**: a job is "released" the first time any source sees it. The first-ever run (or 50+ inserts at once) is backfill: stored and shown, but no notifications.
+4. **Enrich** new releases (redirects, ATS, JD, form questions), optionally draft (`AUTO_DRAFT=1`), then **notify** via macOS.
 
 ### Auto-apply flow
 
-When you click **Apply** on a drafted job (or run `pnpm apply:batch`):
+**Auto-apply** on a job (or `pnpm apply:batch`): ensures a draft exists (drafting it now if needed) → double-apply guard per company → Playwright fills the live form from `contact.json` → draft → Claude for anything unmatched → attaches `data/resume.pdf` → submits (unless `AUTO_SUBMIT=0`) or leaves the window open on CAPTCHA / anything unexpected. Every attempt is recorded with a per-field audit trail.
 
-1. Ensures a draft exists (enriches + tailors if missing)
-2. Double-apply guard: warns if you already applied to the same company
-3. Launches Playwright (headed by default)
-4. Reads whatever form the page actually renders (live DOM extraction)
-5. Fills fields from `contact.json` → tailored draft → Claude for anything unmatched
-6. Attaches `data/resume.pdf`
-7. Submits (unless `AUTO_SUBMIT=0`) or leaves the window open on CAPTCHA / unexpected state
-
-Workday and LinkedIn are login-walled and stay manual. Every attempt is recorded in the `applications` table with per-field audit trail.
+Workday and LinkedIn postings are login-walled: they're discovered and linked, but you apply by hand.
 
 ## Commands
 
 ```bash
 pnpm dev                 # UI at http://localhost:3000
 pnpm ingest              # run the full pipeline once (what the watcher runs)
+pnpm test:discovery      # filter checks + live per-source keep counts
 pnpm watcher:install     # launchd agent, every 15 min (logs: data/watch.log)
 pnpm watcher:status
 pnpm watcher:uninstall
 pnpm blocklist:sweep     # retroactively skip open jobs from blocklisted companies
 pnpm apply:dry <jobId>   # fill a form without submitting (sanity check)
 pnpm apply:batch         # batch apply to drafted jobs (--limit, --gap, --starred)
-pnpm github:sync         # pull public GitHub repos + tag them for role-aware project picks in drafts
 pnpm db:studio           # browse the DB
 ```
 
-`pnpm github:sync` writes `data/github-projects.json`. On each draft, the pipeline ranks those projects against the JD (e.g. quant roles prefer trading/market repos over a generic web app) and steers the cover letter / project answers accordingly. Re-run after you ship something new.
+## Tuning
 
-### Resume (LaTeX)
-
-Source lives in `resume/resume.tex` (Jake's Resume template). Two education variants:
-
-| File | When used | Education line |
-|------|-----------|----------------|
-| `data/resume.pdf` | new-grad / full-time | B.S., expected May 2027 |
-| `data/resume-internship.pdf` | internships | B.S./M.S., expected May 2028 |
-
-```bash
-pnpm resume:build   # compiles both with tectonic → data/
-```
-
-Drafts and form fills for internship jobs use the May 2028 / B.S./M.S. framing automatically (screening answers + contact overrides). New-grad stays on May 2027.
-## Sources
-
-Configured in `lib/ingest/sources.ts`:
-
-- SimplifyJobs/New-Grad-Positions
-- SimplifyJobs/Summer2026-Internships
-- speedyapply/2026-SWE-College-Jobs
-- ambicuity/New-Grad-Jobs
-- zapplyjobs/New-Grad-Jobs-2026
-- jobright-ai/2026-Software-Engineer-New-Grad
-- northwesternfintech/2026QuantInternships
-- northwesternfintech/2027QuantInternships
+| File | Controls |
+|---|---|
+| `lib/target.ts` | Role keywords, off-target exclusions, level detection |
+| `config/search.json` | Levels (internship / new-grad), grad-only exclusion, unknown-location handling |
+| `config/target-companies.json` | Robotics-native companies whose generic SWE internships count |
+| `lib/scout/watch-boards.ts` | Curated Greenhouse / Lever / Ashby boards |
+| `lib/scout/workday-tenants.ts` | Curated Workday career sites |
+| `lib/ingest/sources.ts` | GitHub lists |
+| `config/company-blocklist.json` | Companies to drop (`soft`: experienced roles only, `hard`: entirely) |
 
 ## Project layout
 
 ```
-app/                    Next.js UI (inbox, job detail, API routes)
+app/                    Next.js UI (inbox, job detail, resume, API routes)
 db/                     Drizzle schema
 lib/
-  pipeline.ts           ingest → scout → enrich → draft → notify
-  ingest/               README fetchers, parsers, dedupe, blocklist, NUFT quant parser
-  scout/                ATS board polling, YC discovery, HN, Remotive, Google Careers
+  target.ts             what counts as an embedded / robotics job (shared by every source)
+  pipeline.ts           ingest → scout → enrich → (draft) → notify
+  ingest/               README fetchers, parsers, dedupe, location, blocklist
+  scout/                ATS boards, Workday, YC discovery, HN, Google Careers
   enrich/               per-job: finalUrl + ATS + JD + form questions
-  tailor/               Claude draft generation (structured outputs)
-  github/               GitHub repo sync + role-affinity ranking for drafts
+  tailor/               Claude form-answer drafts (structured outputs)
   apply/                Playwright auto-apply (live form extraction + fill)
-  ats/                  ATS detection + form-question fetching
-  jd/                   JD fetchers
-  notify.ts             macOS notifications
-config/
-  screening-answers.json
-  company-blocklist.json
-data/                   local only (gitignored): db, profile, resume, contact, logs
-resume/                 LaTeX resume source + compiled PDF
-scripts/
-  run-ingest.ts         pipeline CLI
-  watcher.ts            launchd install/uninstall
-  batch-apply.ts        batch auto-apply
-  dry-run-apply.ts      fill without submit
-  sweep-blocklist.ts    retroactive blocklist sweep
+  ats/ jd/              ATS detection, form questions, JD fetchers (incl. Workday)
+  resume/paths.ts       the single resume path
+config/                 search settings, target companies, blocklist, screening-answers template
+data/                   local only (gitignored): db, profile, resume, contact, screening answers, logs
+scripts/                ingest CLI, watcher, batch / dry-run apply, blocklist sweep, discovery test
 ```
 
 ## Notes
 
-- Tailoring defaults to `claude-opus-4-8` with prompt caching. Override with `ANTHROPIC_MODEL` in `.env.local`.
+- Drafts default to `claude-opus-4-8` with prompt caching. Override with `ANTHROPIC_MODEL` in `.env.local`.
 - Drafts and apply answers never use em dashes (style rule in the system prompt).
-- Outbound fetches timeout at 20s. Enrichment runs in parallel batches of 5 so one slow career site cannot stall the pipeline.
-- The watcher only runs ingest/scout/enrich/draft/notify. It does **not** auto-apply in the background. Applying always requires you to trigger it.
-
-## Roadmap
-
-- **now:** watch → notify → real-form tailored drafts → Playwright auto-apply; GitHub project ranking; **per-job resume PDFs** (education track + project order + skill keyword surfacing)
-- **next:** richer per-bullet rewrites for experience when grounded in the JD
-- **later:** contact discovery, follow-up tracker
+- The watcher never auto-applies in the background. Applying always requires you to trigger it.
+- Requires Node 22+ (`better-sqlite3` 13).

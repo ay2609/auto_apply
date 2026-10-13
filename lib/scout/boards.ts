@@ -1,43 +1,35 @@
 import { db } from "@/db";
 import { jobs, companies } from "@/db/schema";
-import { eq, sql } from "drizzle-orm";
-import { SWE_TITLE_RE, NEGATIVE_TITLE_RE, QUANT_TITLE_RE, BACKFILL_THRESHOLD, upsertCompany } from "@/lib/ingest/run";
+import { eq, sql, inArray } from "drizzle-orm";
+import { BACKFILL_THRESHOLD, upsertCompany } from "@/lib/ingest/run";
 import { dedupeKey, coarseKey } from "@/lib/ingest/dedupe";
-import { classify, isTarget, isQuantHub } from "@/lib/ingest/location";
+import { classify, isTargetLocation } from "@/lib/ingest/location";
 import { isBlockedCompany } from "@/lib/ingest/blocklist";
-import { EARLY_CAREER_RE, SENIOR_TITLE_RE } from "@/lib/ingest/early-career";
-import {
-  greenhouseEmploymentType,
-  isEarlyCareerEmployment,
-  kindFromTitleOrEmployment,
-  titleWithEmployment,
-  type GhMeta,
-} from "@/lib/ats/employment";
+import { isWantedPosting, type Level } from "@/lib/target";
+import { greenhouseEmploymentType, titleWithEmployment, type GhMeta } from "@/lib/ats/employment";
 import { discoverYcBoards, getDiscoveredBoards, loadState, saveState, type DiscoverResult } from "./discover";
 import { WATCH_BOARDS } from "./watch-boards";
 import { loadCoarseKeys } from "./coarse";
 
 /**
  * Direct ATS board watcher. Boards come from:
- *  1. curated WATCH_BOARDS (Jane Street, Stripe, …),
+ *  1. curated WATCH_BOARDS — robotics / embedded / aerospace companies (watch-boards.ts),
  *  2. every company already in the DB (GH/Lever/Ashby/SmartRecruiters/Workable),
- *  3. YC hiring discovery + NUFT quant boards (see discover.ts).
+ *  3. YC robotics/hardware hiring discovery (see discover.ts).
  *
- * Two admission tiers per posting:
- *  - EXPLICIT: title OR Greenhouse Employment Type says new-grad / intern /
- *    co-op / junior → full pipeline (notify + auto-draft).
- *  - AMBIENT (startup boards only): plain SWE title with no seniority marker.
+ * Each posting goes through isWantedPosting (lib/target.ts). On "domain"
+ * boards (robotics-native companies) generic engineering internships count;
+ * elsewhere the title itself must be embedded / robotics / hardware.
  *
- * Mega-tech boards stay on the watch list: early-career titles (and metadata)
- * pass the blocklist exception; senior FAANG spray still gets dropped.
+ * A board's first poll seeds quietly; later polls report deltas as releases.
+ * Jobs that disappear from a cleanly-fetched board are closed.
  */
 
 const UA = "auto-apply-scout/0.1";
 const TIMEOUT = AbortSignal.timeout.bind(AbortSignal);
-const AMBIENT_CAP_PER_RUN = 40;
 
 type BoardAts = "greenhouse" | "lever" | "ashby" | "smartrecruiters" | "workable";
-type Board = { ats: BoardAts; token: string; company: string; companyId?: number; startup?: boolean };
+type Board = { ats: BoardAts; token: string; company: string; companyId?: number; domain?: boolean };
 type Posting = {
   title: string;
   locationRaw: string;
@@ -49,10 +41,11 @@ type Posting = {
 export type ScoutBoardsResult = {
   boards: number;
   postingsSeen: number;
+  matched: number;
   newJobIds: number[];
-  /** Explicit-tier postings from first-poll boards — inserted quietly. */
+  /** Postings from first-poll boards — inserted quietly. */
   seeded: number;
-  ambientNew: number;
+  closed: number;
   backfill: boolean;
   discovery?: DiscoverResult;
 };
@@ -67,73 +60,101 @@ export async function scoutBoards(): Promise<ScoutBoardsResult> {
   const state = loadState();
   const polled = new Set(state.polledBoards ?? []);
 
-  const explicit: Array<{ board: Board; posting: Posting; seeding: boolean }> = [];
-  const ambient: Array<{ board: Board; posting: Posting }> = [];
+  const matched: Array<{ board: Board; posting: Posting; seeding: boolean; kind: Level }> = [];
+  /** source tag → dedupe keys still listed, for boards fetched cleanly this run. */
+  const liveByBoard = new Map<string, Set<string>>();
   let postingsSeen = 0;
   const BATCH = 12;
   for (let i = 0; i < boards.length; i += BATCH) {
     const results = await Promise.allSettled(boards.slice(i, i + BATCH).map((b) => fetchBoard(b)));
     for (const r of results) {
       if (r.status !== "fulfilled") continue;
-      const boardKey = `${r.value.board.ats}:${r.value.board.token.toLowerCase()}`;
+      const { board } = r.value;
+      const boardKey = `${board.ats}:${board.token.toLowerCase()}`;
       const seeding = !polled.has(boardKey);
-      if (r.value.fetched) polled.add(boardKey);
+      const live = new Set<string>();
+      if (r.value.fetched) {
+        polled.add(boardKey);
+        liveByBoard.set(sourceTag(board), live);
+      }
       postingsSeen += r.value.postings.length;
       for (const raw of r.value.postings) {
-        const posting: Posting = {
-          ...raw,
-          title: titleWithEmployment(raw.title, raw.employmentType),
-        };
-        const admitBlob = `${raw.title} ${raw.employmentType ?? ""}`;
-        const isQuant = QUANT_TITLE_RE.test(admitBlob);
-        if (NEGATIVE_TITLE_RE.test(posting.title) && !isQuant) continue;
-        if (!SWE_TITLE_RE.test(admitBlob) && !isQuant) continue;
-        if (isBlockedCompany(r.value.board.company, { title: admitBlob })) continue;
-        if (!isTarget(classify(posting.locationRaw)) && !(isQuant && isQuantHub(posting.locationRaw))) continue;
-        const early =
-          EARLY_CAREER_RE.test(admitBlob) || isEarlyCareerEmployment(raw.employmentType);
-        if (early) {
-          explicit.push({ board: r.value.board, posting, seeding });
-        } else if (r.value.board.startup && !SENIOR_TITLE_RE.test(posting.title)) {
-          ambient.push({ board: r.value.board, posting });
-        }
+        const posting: Posting = { ...raw, title: titleWithEmployment(raw.title, raw.employmentType) };
+        const kind = isWantedPosting({
+          title: posting.title,
+          company: board.company,
+          employmentType: raw.employmentType,
+          domainBoard: board.domain,
+        });
+        if (!kind) continue;
+        if (isBlockedCompany(board.company, { title: posting.title })) continue;
+        if (!isTargetLocation(posting.locationRaw)) continue;
+        live.add(dedupeKey(board.company, posting.title, posting.locationRaw));
+        matched.push({ board, posting, seeding, kind });
       }
     }
   }
   state.polledBoards = [...polled];
   saveState(state);
 
-  const freshExplicit = explicit.filter(
+  const fresh = matched.filter(
     ({ board, posting }) => !existingKeys.has(dedupeKey(board.company, posting.title, posting.locationRaw)),
   );
-  const liveNew = freshExplicit.filter((x) => !x.seeding);
+  const liveNew = fresh.filter((x) => !x.seeding);
   const backfill = liveNew.length > BACKFILL_THRESHOLD;
   const now = new Date();
 
   const newJobIds: number[] = [];
   let seeded = 0;
-  for (const { board, posting, seeding } of freshExplicit) {
+  for (const { board, posting, seeding, kind } of fresh) {
     const quiet = seeding || backfill;
-    const id = await insertPosting(board, posting, { backfilled: quiet, now, existingKeys, coarseKeys });
+    const id = await insertPosting(board, posting, kind, { backfilled: quiet, now, existingKeys, coarseKeys });
     if (id === null) continue;
     if (quiet) seeded += 1;
     else newJobIds.push(id);
   }
 
-  let ambientNew = 0;
-  for (const { board, posting } of ambient) {
-    if (ambientNew >= AMBIENT_CAP_PER_RUN) break;
-    const id = await insertPosting(board, posting, { backfilled: true, now, existingKeys, coarseKeys, ambient: true });
-    if (id !== null) ambientNew += 1;
-  }
+  const closed = await syncBoardJobs(liveByBoard, now);
 
-  return { boards: boards.length, postingsSeen, newJobIds, seeded, ambientNew, backfill, discovery };
+  return { boards: boards.length, postingsSeen, matched: matched.length, newJobIds, seeded, closed, backfill, discovery };
+}
+
+function sourceTag(board: Board): string {
+  return `scout:${board.ats}:${board.token}`;
+}
+
+/**
+ * For every board fetched cleanly: bump lastSeenAt on jobs it still lists
+ * (reopening them if needed) and close open jobs it no longer lists.
+ */
+async function syncBoardJobs(liveByBoard: Map<string, Set<string>>, now: Date): Promise<number> {
+  const rows = db
+    .select({ id: jobs.id, dedupeKey: jobs.dedupeKey, sourceRepos: jobs.sourceRepos, closedAt: jobs.closedAt, status: jobs.status })
+    .from(jobs)
+    .where(sql`${jobs.sourceRepos} LIKE '%scout:%'`)
+    .all();
+  const seen: number[] = [];
+  const gone: number[] = [];
+  for (const j of rows) {
+    const tag = (j.sourceRepos ?? []).find((s) => liveByBoard.has(s));
+    if (!tag) continue;
+    if (liveByBoard.get(tag)!.has(j.dedupeKey)) seen.push(j.id);
+    else if (j.closedAt === null && (j.status === "discovered" || j.status === "drafted")) gone.push(j.id);
+  }
+  if (seen.length > 0) {
+    await db.update(jobs).set({ lastSeenAt: now, closedAt: null }).where(inArray(jobs.id, seen));
+  }
+  if (gone.length > 0) {
+    await db.update(jobs).set({ closedAt: now, updatedAt: now }).where(inArray(jobs.id, gone));
+  }
+  return gone.length;
 }
 
 async function insertPosting(
   board: Board,
   posting: Posting,
-  opts: { backfilled: boolean; now: Date; existingKeys: Set<string>; coarseKeys: Set<string>; ambient?: boolean },
+  kind: Level,
+  opts: { backfilled: boolean; now: Date; existingKeys: Set<string>; coarseKeys: Set<string> },
 ): Promise<number | null> {
   const key = dedupeKey(board.company, posting.title, posting.locationRaw);
   if (opts.existingKeys.has(key)) return null;
@@ -148,12 +169,12 @@ async function insertPosting(
     .values({
       companyId,
       title: posting.title,
-      kind: kindFromTitleOrEmployment(posting.title, posting.employmentType),
+      kind,
       locationRaw: posting.locationRaw,
       locationClass: classify(posting.locationRaw),
       applyUrl: posting.applyUrl,
       atsType: ats,
-      sourceRepos: [`scout:${board.ats}:${board.token}${opts.ambient ? ":ambient" : ""}`],
+      sourceRepos: [sourceTag(board)],
       status: "discovered",
       dedupeKey: key,
       backfilled: opts.backfilled,
@@ -170,8 +191,9 @@ function mergeBoards(...groups: Board[][]): Board[] {
     for (const b of group) {
       const key = `${b.ats}:${b.token.toLowerCase()}`;
       const prev = seen.get(key);
-      // Prefer non-startup (watch list) over ambient-capable startup boards.
-      if (!prev || (prev.startup && b.startup === false)) seen.set(key, b);
+      // Keep the domain flag if any source marks the board robotics-native.
+      if (!prev) seen.set(key, b);
+      else if (b.domain && !prev.domain) seen.set(key, { ...prev, domain: true });
     }
   }
   return [...seen.values()];
@@ -199,10 +221,6 @@ async function dbBoards(): Promise<Board[]> {
   for (const r of rows) {
     for (const url of [r.finalUrl, r.applyUrl]) {
       if (!url) continue;
-      if (/janestreet\.com\/join-jane-street/i.test(url)) {
-        add("greenhouse", "janestreet", r);
-        break;
-      }
       const gh = url.match(/(?:boards|job-boards)(?:\.eu)?\.greenhouse\.io\/(?:embed\/job_app\?for=)?([a-z0-9_-]+)/i);
       if (gh && (r.ats === "greenhouse" || r.ats === "custom") && gh[1] !== "embed") {
         add("greenhouse", gh[1], r);
